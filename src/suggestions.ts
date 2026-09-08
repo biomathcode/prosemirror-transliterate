@@ -35,42 +35,44 @@ export type Language =
     | "ur"
     | "vi";
 
-type Config = {
+/** Options for the optional Google Input Tools adapter. */
+export interface SuggestionOptions {
     numOptions?: number;
     showCurrentWordAsLastSuggestion?: boolean;
     lang?: Language;
-};
+    signal?: AbortSignal;
+}
 
-export const getTransliterateSuggestions = async (
+/** Fetch suggestions from the unofficial Google Input Tools endpoint.
+ * Failures return the original word (if enabled) or an empty list.
+ * Aborted requests always return an empty list.
+ */
+export async function getTransliterateSuggestions(
     word: string,
-    config?: Config,
-): Promise<string[]> => {
-    const { numOptions, showCurrentWordAsLastSuggestion, lang } = config || {
-        numOptions: 5,
-        showCurrentWordAsLastSuggestion: true,
-        lang: "hi",
-    };
-    // fetch suggestion from api
-    // const url = `https://www.google.com/inputtools/request?ime=transliteration_en_${lang}&num=5&cp=0&cs=0&ie=utf-8&oe=utf-8&app=jsapi&text=${word}`;
-
-    const url = `https://inputtools.google.com/request?text=${word}&itc=${lang}-t-i0-und&num=${numOptions}&cp=0&cs=1&ie=utf-8&oe=utf-8&app=demopage`;
+    { numOptions = 5, showCurrentWordAsLastSuggestion = true, lang = "hi", signal }: SuggestionOptions = {},
+): Promise<string[]> {
+    if (!word.trim() || signal?.aborted) return [];
+    const limit = Number.isFinite(numOptions) ? Math.max(1, Math.min(10, Math.floor(numOptions))) : 5;
+    const params = new URLSearchParams({
+        text: word, itc: `${lang}-t-i0-und`, num: String(limit),
+        cp: "0", cs: "1", ie: "utf-8", oe: "utf-8", app: "demopage",
+    });
+    let suggestions: string[] = [];
     try {
-        const res = await fetch(url);
-        const data = await res.json();
-        if (data && data[0] === "SUCCESS") {
-            const found = showCurrentWordAsLastSuggestion
-                ? [...data[1][0][1], word]
-                : data[1][0][1];
-            return found;
-        } else {
-            if (showCurrentWordAsLastSuggestion) {
-                return [word];
+        const response = await fetch(`https://inputtools.google.com/request?${params}`, { signal });
+        if (response.ok) {
+            const data: unknown = await response.json();
+            if (Array.isArray(data) && data[0] === "SUCCESS" && Array.isArray(data[1])) {
+                const result: unknown = data[1][0];
+                if (Array.isArray(result) && Array.isArray(result[1])) {
+                    suggestions = result[1].filter((item: unknown): item is string => typeof item === "string" && item.length > 0);
+                }
             }
-            return [];
         }
-    } catch (e) {
-        // catch error
-        console.error("There was an error with transliteration", e);
-        return [];
+    } catch {
+        // A provider outage must never prevent normal editor input.
     }
-};
+    if (signal?.aborted) return [];
+    const result = [...new Set(suggestions)].slice(0, limit);
+    return showCurrentWordAsLastSuggestion ? [...result.filter(item => item !== word), word] : result;
+}
